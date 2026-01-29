@@ -1,5 +1,12 @@
 import { Hono } from "hono";
 import { logger } from "hono/logger";
+import { getSupported } from "./facilitator/supported.js";
+import { verify } from "./facilitator/verify.js";
+import { settle } from "./facilitator/settle.js";
+import { VerifyRequestSchema, SettleRequestSchema } from "./types/schemas.js";
+import { connectClient, disconnectClient, getClient } from "./xrpl/client.js";
+import type { XrplNetwork } from "./xrpl/constants.js";
+import type { ExactXrplPayload } from "./types/xrpl-payload.js";
 
 const app = new Hono();
 
@@ -14,41 +21,81 @@ app.get("/", (c) => {
   });
 });
 
-// x402 facilitator endpoints
+// GET /supported — list supported schemes and networks
 app.get("/supported", (c) => {
-  return c.json({
-    kinds: [
-      {
-        x402Version: 2,
-        scheme: "exact",
-        network: "xrpl:1", // Testnet for now
-      },
-    ],
-    extensions: [],
-    signers: {},
-  });
+  return c.json(getSupported());
 });
 
+// POST /verify — validate payment without settling
 app.post("/verify", async (c) => {
-  // TODO: Implement verification logic
-  return c.json({
-    isValid: false,
-    invalidReason: "not_implemented",
-  });
+  const body = await c.req.json();
+  const parsed = VerifyRequestSchema.safeParse(body);
+
+  if (!parsed.success) {
+    return c.json(
+      { isValid: false, invalidReason: `invalid_request: ${parsed.error.message}` },
+      400,
+    );
+  }
+
+  const { paymentPayload, paymentRequirements } = parsed.data;
+  const network = paymentPayload.network as XrplNetwork;
+  const client = getClient(network);
+  const payload = paymentPayload.payload as ExactXrplPayload;
+
+  const result = await verify(payload, paymentRequirements, client);
+  return c.json(result);
 });
 
+// POST /settle — validate and submit to blockchain
 app.post("/settle", async (c) => {
-  // TODO: Implement settlement logic
-  return c.json({
-    success: false,
-    errorReason: "not_implemented",
-    transaction: "",
-    network: "xrpl:1",
-  });
+  const body = await c.req.json();
+  const parsed = SettleRequestSchema.safeParse(body);
+
+  if (!parsed.success) {
+    return c.json(
+      { success: false, errorReason: `invalid_request: ${parsed.error.message}` },
+      400,
+    );
+  }
+
+  const { paymentPayload, paymentRequirements } = parsed.data;
+  const network = paymentPayload.network as XrplNetwork;
+  const client = getClient(network);
+
+  if (!client) {
+    return c.json(
+      { success: false, errorReason: "xrpl_client_not_connected", network },
+      503,
+    );
+  }
+
+  const payload = paymentPayload.payload as ExactXrplPayload;
+  const result = await settle(payload, paymentRequirements, client, network);
+  return c.json(result);
 });
 
-const port = process.env.PORT ?? 3402;
-console.log(`xrp402 facilitator starting on port ${port}`);
+const port = process.env["PORT"] ?? 3402;
+
+// XRPL client lifecycle
+connectClient().then(() => {
+  console.log(`xrp402 facilitator starting on port ${port}`);
+}).catch((err) => {
+  console.error("Failed to connect XRPL client:", err);
+  console.log(`xrp402 facilitator starting on port ${port} (without XRPL connection)`);
+});
+
+process.on("SIGTERM", async () => {
+  console.log("Shutting down...");
+  await disconnectClient();
+  process.exit(0);
+});
+
+process.on("SIGINT", async () => {
+  console.log("Shutting down...");
+  await disconnectClient();
+  process.exit(0);
+});
 
 export default {
   port,

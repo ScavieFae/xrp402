@@ -4,7 +4,7 @@
 
 Build the first x402 facilitator for XRPL, enabling HTTP 402 native payments for agentic commerce. Potential to integrate Multi-Purpose Tokens (MPTs) for compliance-aware payments — a capability no other x402 implementation has.
 
-**Status:** SPECCING — design decisions locked, digging into implementation
+**Status:** IMPLEMENTING — research complete, design locked, building verify/settle
 
 ---
 
@@ -16,6 +16,12 @@ Build the first x402 facilitator for XRPL, enabling HTTP 402 native payments for
 | **P0 Assets** | XRP and RLUSD. Both are ecosystem bread and butter. |
 | **MPT Strategy** | Future-proof the architecture. Evaluate complexity as we spec. Add without refactor. |
 | **Cost Model** | Keep it cheap. Fly.io/Railway + XRPL public nodes. Scale-to-zero friendly. |
+| **Fee Model** | Tiered: standard x402 (XRP/RLUSD) is free. XRPL-native features (MPT compliance, cross-currency) charge a per-tx facilitator fee via two-transaction model. See Fee Model section. |
+| **RLUSD** | Currency code: `RLUSD` (hex: `524C555344000000000000000000000000000000`). Mainnet issuer: `rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De`. Testnet issuer: `rQhWct2fv4Vc4KRjRgMrxa8xPN9Zx9iLKV`. |
+| **Partial Payments** | Hard reject any tx with `tfPartialPayment` flag. Non-negotiable for x402 — a "1000 XRP" payment must deliver 1000 XRP. |
+| **Trust Lines** | Check in `/verify` as soft-fail. If RPC call fails, continue — settlement catches it as `tecPATH_DRY`. |
+| **Sequence Handling** | Accept both regular sequences and Tickets. Recommend Tickets in client docs — they solve the stale-sequence problem. |
+| **Network Checks** | All network calls in verify are soft-fail. Transient RPC errors should not reject a potentially valid payment. Matches EVM reference pattern. |
 
 ---
 
@@ -69,21 +75,123 @@ T54.ai's differentiator is pre-transaction risk assessment for AI agents. Our di
 
 What makes this more than "x402 on another chain":
 
-1. **MPT Compliance Integration** (Future)
+1. **MPT Compliance Integration** (Phase 2)
    - x402 payments that respect on-chain KYC flags
    - Transfer restrictions enforced at protocol level
-   - Auditor key support (Confidential MPTs, Q1 2026)
+   - Regular MPTs (compliance flags, freeze/clawback) are live on mainnet now
+   - Confidential MPTs (ZKP privacy, auditor keys, XLS-94) not yet shipped — depends on XRPL amendment process
    - First x402 implementation banks/FIs might consider
 
 2. **Cost Advantage**
    - XRPL tx fees: ~$0.0002 (basically free)
    - Public RPC nodes (XRPL Foundation)
    - Scale-to-zero hosting viable
+   - Standard x402 payments are free — no facilitator fee for XRP/RLUSD
 
-3. **Cross-Currency Potential** (Phase 3)
+3. **Cross-Currency Settlement** (Phase 3)
    - XRPL's native DEX enables auto-conversion
    - Pay in XRP, settle in RLUSD
    - No separate DEX integration needed
+
+4. **Tiered Fee Model**
+   - Commodity behavior (submit a signed blob) is free — same as Coinbase's first year
+   - Differentiated behavior (MPT compliance, cross-currency) charges a facilitator fee
+   - Revenue tied to features only this facilitator can provide
+   - See [Fee Model](#fee-model) section for mechanics
+
+---
+
+## Fee Model
+
+### Strategy
+
+Coinbase ran their x402 facilitator free for all of 2025, then introduced $0.001/settlement in January 2026. They're subsidizing growth — playing for total volume across their platform. We don't need to play that game. We're the only XRPL facilitator; anyone who wants x402 on XRPL uses ours.
+
+Instead of subsidizing or charging for everything, we tier by capability:
+
+| Tier | Features | Fee | Rationale |
+|------|----------|-----|-----------|
+| **Standard** | XRP + RLUSD verify/settle | **Free** | Commodity x402 behavior. Any generic x402 client works. Builds adoption, costs us near-zero to operate. |
+| **Compliance** | MPT payments with flag validation, authorized holder checks, audit support | **Per-tx fee** | Differentiated. Only this facilitator can do it. Clients using MPTs are XRPL-native by definition — they understand the ecosystem patterns (Tickets, two-tx). |
+| **Cross-Currency** | Pay in XRP, settle in RLUSD via native DEX | **Per-tx fee** | Differentiated. XRPL-native DEX integration no other facilitator has. |
+
+The insight: clients using XRPL-native features already know they're on XRPL. They're building with xrpl.js, they understand Tickets, they've set up trust lines. The two-transaction fee pattern isn't a surprise — it's part of the same ecosystem they're already working in. Charging for commodity blob submission would be friction without justification. Charging for capabilities that only exist here is defensible.
+
+### Mechanism: Two-Transaction Model
+
+The facilitator never holds funds (spec principle + regulatory). So we can't take a cut from the merchant payment. Instead, the client signs two transactions:
+
+1. **Merchant payment** — pays the resource server (same as standard tier)
+2. **Facilitator fee** — pays the facilitator's address (only for paid-tier features)
+
+The facilitator controls submission order: merchant first, fee second. Risk profile:
+
+| Merchant tx | Fee tx | Outcome |
+|-------------|--------|---------|
+| Succeeds | Succeeds | Ideal |
+| Fails | Not submitted | Clean — nobody loses |
+| Succeeds | Fails | Client got resource, facilitator missed fee. **Facilitator absorbs the loss.** |
+
+The worst case (client pays fee, doesn't get resource) cannot happen because the facilitator controls ordering.
+
+### How It Works
+
+**`/supported` advertises the fee via `getExtra()`:**
+```json
+{
+  "facilitatorAddress": "rFacilitator...",
+  "facilitatorFee": {
+    "standard": null,
+    "mpt": "100000",
+    "crossCurrency": "100000"
+  }
+}
+```
+
+**Paid-tier payload extends the standard payload:**
+```typescript
+interface ExactXrplPayload {
+  txBlob: string;
+  authorization: XrplAuthorization;
+
+  // Present only for paid-tier features (MPT, cross-currency)
+  feeTxBlob?: string;
+  feeAuthorization?: {
+    account: string;
+    destination: string;      // Must match facilitatorAddress
+    amount: string;           // Must match advertised fee
+    sequence: number;
+    ticketSequence?: number;
+  };
+}
+```
+
+**Settlement for paid tier:**
+1. Verify merchant tx (full pipeline)
+2. Verify fee tx (signature, destination matches facilitator, amount matches advertised fee)
+3. Submit merchant tx, wait for confirmation
+4. If merchant succeeds → submit fee tx (best-effort)
+5. If fee tx fails → log, still return success to client
+
+### V1 → V2 Expansion
+
+This is purely additive. The V1 payload type, verification pipeline, and settlement logic are untouched:
+
+- `feeTxBlob` and `feeAuthorization` are optional fields — every V1 payload is a valid V2 payload
+- Merchant verification and settlement are the same code path
+- Fee verification is a new function called alongside (not replacing) merchant verification
+- Fee settlement wraps around the existing merchant settlement without modifying it
+- The facilitator needs an XRPL wallet to receive fees (new operational requirement in V2, not V1)
+
+The key V1 implementation detail: keep `submitAndWait` as its own function, not inlined into settle. V2 needs to insert fee submission between "merchant confirmed" and "return result."
+
+### What's Not in V1
+
+- No facilitator wallet needed
+- No fee fields in payload type (they're optional, V1 never sees them)
+- No two-phase settlement logic
+- No `getExtra()` fee advertising
+- Standard XRP + RLUSD payments work with any generic x402 client
 
 ---
 
@@ -113,6 +221,8 @@ Three endpoints per x402 v2 spec:
 
 The key difference from EVM: XRPL uses **pre-signed transaction blobs** rather than EIP-712 authorization signatures.
 
+On EVM, the client signs an EIP-712 message authorizing a transfer; the facilitator calls a contract function and pays gas. On XRPL, the client signs a complete Payment transaction (but doesn't submit it). The facilitator submits the pre-signed blob. The client pays the network fee (baked into the signed tx). This is actually cleaner — the facilitator can't modify the transaction, can't redirect funds, can't change the amount.
+
 **PaymentPayload.payload structure for XRPL:**
 
 ```typescript
@@ -120,55 +230,123 @@ interface ExactXrplPayload {
   // The fully signed transaction blob (hex)
   txBlob: string;
 
-  // Pre-parsed fields for quick validation
-  // (facilitator can also deserialize txBlob to verify)
+  // Pre-parsed fields for quick validation.
+  // Facilitator MUST cross-check these against the decoded txBlob —
+  // trust but verify. If these don't match the blob, reject.
   authorization: {
-    account: string;      // Source account (rAddress)
-    destination: string;  // Destination account
+    account: string;                    // Source account (rAddress)
+    destination: string;                // Destination account
     amount: string | IssuedCurrencyAmount;
-    fee: string;          // Fee in drops
-    sequence: number;
-    lastLedgerSequence: number;
+    fee: string;                        // Fee in drops
+    sequence: number;                   // 0 if using Ticket
+    ticketSequence?: number;            // Present if using Ticket
+    lastLedgerSequence?: number;        // Null/omitted for non-expiring ticketed txs
   };
 }
 
 interface IssuedCurrencyAmount {
-  currency: string;   // "USD" or currency hex
+  currency: string;   // "RLUSD" (or 40-char hex for non-ASCII codes)
   issuer: string;     // Issuer rAddress
-  value: string;      // Decimal amount
+  value: string;      // Decimal amount (up to 15 significant digits)
 }
 ```
 
+### Tickets (Sequence Number Solution)
+
+XRPL uses incrementing sequence numbers, not random nonces. If a client signs a tx with sequence N for our facilitator, then sends any other transaction, sequence N is consumed and our tx is permanently invalid (`tefPAST_SEQ`). EVM avoids this because EIP-3009 uses random nonces.
+
+**Tickets solve this.** They reserve sequence numbers out of order:
+
+1. Client sends `TicketCreate` to reserve a batch (up to 250)
+2. Client signs x402 payment with `Sequence: 0, TicketSequence: N`
+3. Client can continue normal transactions freely — Tickets are independent of the regular sequence
+
+The facilitator accepts both patterns:
+
+| Pattern | Fields | Verify check |
+|---------|--------|-------------|
+| Regular sequence | `sequence: N, ticketSequence: undefined` | `account_info` → sequence matches |
+| Ticket | `sequence: 0, ticketSequence: N` | `account_objects(type: "ticket")` → Ticket exists |
+
+Tickets are the recommended path for any client that uses their wallet for more than x402 payments. We document this in client-facing docs but don't require it.
+
+Tickets become especially important for paid-tier features (Phase 2+), where the client signs two transactions (merchant + facilitator fee). With regular sequences, that's N and N+1 — if anything happens between them, one breaks. With Tickets, they're independent.
+
 ### Verification Steps
 
-1. **Deserialize txBlob** — Parse the signed transaction
-2. **Verify signature** — Confirm tx is properly signed by `account`
-3. **Check destination** — Must match `requirements.payTo`
-4. **Check amount** — Must meet or exceed `requirements.amount`
-5. **Check asset** — Must match `requirements.asset` (XRP or issuer)
-6. **Check time bounds** — `LastLedgerSequence` must be in valid future range
-7. **Check balance** — Source account has sufficient funds
-8. **Check sequence** — Valid sequence number (not already used)
-9. **(Future) Check MPT flags** — If MPT, verify compliance status
+Ordered cheapest-to-most-expensive. Offline checks first (pure computation), network checks last (RPC calls). This matches the EVM reference implementation's pattern.
+
+**Offline checks (no network needed):**
+
+1. **Deserialize txBlob** — `decode(txBlob)` from xrpl.js. Parses hex blob into transaction object.
+2. **Structural validation** — `validate(tx)` from xrpl.js. Checks required fields, valid field combinations, correct types. Catches malformed transactions before deeper checks.
+3. **Verify signature** — `verifySignature(txBlob)` from xrpl.js. Cryptographic check that the blob is properly signed.
+4. **Cross-check authorization** — Decoded blob fields must match the `authorization` object in the payload. If the client says "destination is rX" but the blob says "destination is rY", reject. Trust but verify.
+5. **Check destination** — Must match `requirements.payTo`.
+6. **Check amount** — Must meet or exceed `requirements.amount`.
+7. **Check asset** — Must match `requirements.asset` (XRP native, or issuer address for RLUSD).
+8. **Reject partial payments** — Hard reject if `tfPartialPayment` flag (0x00020000) is set. A "1000 XRP" x402 payment must deliver 1000 XRP.
+
+**Network checks (require XRPL connection, all soft-fail):**
+
+If any network call fails (RPC timeout, node error), continue verification rather than rejecting. Settlement will catch real problems. This matches the EVM reference's `balanceOf()` pattern.
+
+9. **Check source account** — `account_info(source)`. Balance ≥ amount + fee. Sequence valid (for regular sequence txs) or Ticket exists (for ticketed txs via `account_objects`).
+10. **Check ledger expiry** — `getLedgerIndex()`. If `LastLedgerSequence` is set, must be at least 4 ledgers in the future (~12-20 seconds buffer). If omitted (valid for ticketed txs), skip this check.
+11. **Check destination (issued currency only)** — `account_lines(destination, peer: issuer)`. Trust line must exist with limit > 0. Also check `freeze_peer` flag. Only applies to RLUSD/issued currency payments, not XRP.
+12. **(Future) Check MPT flags** — If MPT, verify compliance status.
 
 ### Settlement Steps
 
-1. **Re-verify** — Run all verification checks
-2. **Submit txBlob** — Submit to XRPL network via `submit` method
-3. **Wait for validation** — ~3-5 seconds until ledger close
-4. **Return result** — Transaction hash and status
+1. **Re-verify** — Run the full verification pipeline again. State can change between verify and settle requests (balance spent, sequence consumed, trust line removed). The EVM reference does this explicitly.
+2. **Submit txBlob** — Submit to XRPL network via `submit` method (submit-only mode, not sign-and-submit). The blob is immutable — nothing can be modified.
+3. **Check preliminary result** — `submit` returns `engine_result` immediately. `tesSUCCESS` means provisionally applied. `tef*`/`tem*` codes mean permanent failure — return error immediately. `ter*` codes mean retryable but we don't retry (the blob might expire).
+4. **Wait for validation** — ~3-5 seconds until ledger close. Transaction appears in validated ledger or `LastLedgerSequence` passes.
+5. **Return result** — Transaction hash, network, payer address, success/failure.
+
+**Key error codes to handle in settlement:**
+
+| Code | Meaning | Action |
+|------|---------|--------|
+| `tesSUCCESS` | Applied | Wait for validation, return success |
+| `tecPATH_DRY` | No trust line or insufficient liquidity | Return failure: "destination cannot receive this asset" |
+| `tecUNFUNDED_PAYMENT` | Insufficient balance | Return failure: "insufficient funds" |
+| `tefPAST_SEQ` | Sequence already used | Return failure: "transaction expired — re-sign" |
+| `tefMAX_LEDGER` | LastLedgerSequence passed | Return failure: "transaction expired — re-sign" |
+| `tecFROZEN` | Trust line frozen | Return failure: "asset frozen" |
 
 ### XRP vs RLUSD vs MPT
 
 **XRP (native):**
 - Amount is string in drops: `"1000000"` = 1 XRP
 - No trust line needed
-- `asset` field: `"XRP"` or native marker
+- `asset` field: `"XRP"`
+- Simplest code path — no issuer, no trust line check
 
 **RLUSD (issued currency):**
-- Amount is object: `{ currency: "USD", issuer: "rIssuer...", value: "10.00" }`
-- Destination needs trust line to issuer
-- `asset` field: Issuer address
+- Amount is object: `{ currency: "RLUSD", issuer: "rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De", value: "10.00" }`
+- Currency code is `RLUSD` (5 chars, stored on-ledger as hex `524C555344000000000000000000000000000000`; xrpl.js handles conversion)
+- Destination needs trust line to issuer (check in verify, soft-fail)
+- `asset` field: Issuer address (`rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De` mainnet, `rQhWct2fv4Vc4KRjRgMrxa8xPN9Zx9iLKV` testnet)
+- `RequireAuth` is **disabled** — anyone can hold RLUSD with just a trust line, no KYC gate
+- `GlobalFreeze` is enabled — Ripple can freeze all RLUSD (handle gracefully)
+- `AllowTrustLineClawback` is enabled — Ripple can claw back (edge case, regulatory)
+- Precision: up to 15 significant digits; practically 2 decimal places for USD-pegged
+- Testnet faucet: [tryrlusd.com](https://tryrlusd.com/)
+
+**RLUSD Configuration (for implementation):**
+```typescript
+const RLUSD_CONFIG = {
+  mainnet: {
+    currency: "RLUSD",
+    issuer: "rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De",
+  },
+  testnet: {
+    currency: "RLUSD",
+    issuer: "rQhWct2fv4Vc4KRjRgMrxa8xPN9Zx9iLKV",
+  },
+} as const;
+```
 
 **MPT (future):**
 - Different transaction type (MPTPayment?)
@@ -206,42 +384,49 @@ interface IssuedCurrencyAmount {
 | Hosting | Fly.io | Scale-to-zero, cheap at low volume |
 | Testing | Vitest | Fast, modern, matches x402 repo |
 
-### MVP Scope
+### Implementation Roadmap
 
-**Phase 1: XRP + RLUSD**
+**Phase 1: Standard Tier (Free)**
 - Three endpoints: `/verify`, `/settle`, `/supported`
 - XRP payments (native)
 - RLUSD payments (issued currency)
+- Ticket-aware sequence validation
 - Testnet + Mainnet support
-- Basic error handling
+- Unit + integration test suite
 - README with usage examples
+- *No facilitator fee. Any x402 client works.*
 
-**Phase 2: Polish + MPT Prep**
-- Comprehensive test suite
-- Better error messages
-- Logging/monitoring
-- Refactor to support MPT code path (stub)
+**Phase 2: Compliance Tier (Paid) — MPT Integration**
+- MPT payment verification + settlement (new asset routing branch)
+- Compliance flag validation (KYC status, transfer restrictions, freeze checks)
+- Two-transaction fee model (facilitator wallet, fee verification, two-phase settlement)
+- `getExtra()` advertises facilitator address + fee schedule
+- Client documentation: Tickets, two-tx pattern, MPT payment construction
+- *Facilitator fee charged for MPT payments. Requires XRPL-aware client.*
+- Note: Regular MPTs are live on mainnet. Confidential MPTs (XLS-94) not yet — Phase 2b when available.
 
-**Phase 3: MPT Integration**
-- MPT payment support
-- Compliance flag validation
-- Confidential MPT support (when available)
+**Phase 3: Cross-Currency Tier (Paid)**
+- XRPL native DEX integration for auto-conversion
+- Pay in XRP, settle in RLUSD (or vice versa)
+- Path-finding via XRPL DEX order book
+- Facilitator fee for cross-currency settlement
+- *Same two-tx fee mechanism as Phase 2.*
 
 ---
 
-## Open Questions (Technical)
+## Resolved Questions (Technical)
 
-1. **RLUSD currency code** — What's the actual currency code? `USD`? `RLUSD`? Need to check issuer details.
+All six original technical questions are now answered. Decisions are in the table above. Summary:
 
-2. **Trust lines** — If destination doesn't have a trust line, payment fails. Do we check this in verify? Or let settle fail?
-
-3. **Who pays gas?** — Client includes Fee in the signed tx, so client pays. This is different from EVM where facilitator pays gas. Is this acceptable for x402 model?
-
-4. **Transaction simulation** — Can we dry-run an XRPL tx before submitting? EVM has `eth_call`. Does XRPL have equivalent?
-
-5. **Nonce handling** — XRPL uses sequence numbers. If a tx is pending, sequence is consumed. Need to handle sequence gaps gracefully.
-
-6. **Partial payments** — XRPL supports partial payments (tfPartialPayment flag). Should we explicitly disallow?
+| Question | Resolution |
+|----------|-----------|
+| RLUSD currency code | `RLUSD` (5-char, hex-encoded on-ledger). Issuer addresses confirmed from Ripple's own repo. |
+| Trust lines | Check in `/verify` as soft-fail. Missing trust line = `tecPATH_DRY` at settlement. |
+| Who pays network fee | Client pays (baked into signed tx). Spec-compliant — x402 takes no position, it's implementation-level. EVM facilitator pays gas, Solana facilitator co-signs as feePayer, XRPL client pays. All valid. |
+| Transaction simulation | `simulate` API exists (XLS-69, rippled 2.4.0). Requires unsigned tx, so not usable for our verify (we receive signed blobs). Useful client-side. Document as recommendation, not in our pipeline. |
+| Sequence handling | Tickets solve the stale-sequence problem. Accept both regular sequences and Tickets. See Tickets section above. |
+| Partial payments | Hard reject `tfPartialPayment`. Non-negotiable for x402. |
+| Facilitator service fee | Tiered model. Standard x402 (XRP/RLUSD) is free — commodity behavior, builds adoption. XRPL-native features (MPT compliance, cross-currency) charge a per-tx fee via two-transaction model. Revenue tied to differentiated capabilities. See Fee Model section. |
 
 ---
 
@@ -298,25 +483,76 @@ Once patterns stabilize, create skills in `.claude/skills/`:
 
 ## Next Steps
 
+**Research (complete):**
 - [x] Read x402 v2 spec in detail
 - [x] Clone reference implementation
 - [x] Understand scheme implementation pattern
 - [x] Research XRPL toolstack
-- [ ] Research RLUSD details (issuer, currency code, trust line requirements)
-- [ ] Write "Hello World" XRPL payment with xrpl.js
-- [ ] Scaffold project with Hono + xrpl.js
-- [ ] Implement `/supported` endpoint (simplest)
-- [ ] Implement verify logic for XRP
-- [ ] Implement settle logic for XRP
-- [ ] Add RLUSD support
-- [ ] Write tests
+- [x] Research RLUSD details (issuer, currency code, trust line requirements)
+- [x] Research verification patterns (EVM reference + xrpl.js builtins)
+- [x] Resolve open technical questions (fees, simulation, sequences, partial payments)
+
+**Scaffolding (complete):**
+- [x] Scaffold project with Hono + xrpl.js
+- [x] Stub endpoints: `/`, `/supported`, `/verify`, `/settle`
+- [x] Integration tests pass (testnet connection, wallet creation, tx signing)
+
+**Phase 1 — Standard Tier (in progress):**
+- [ ] Implement `/supported` endpoint with proper schema
+- [ ] Implement verification pipeline for XRP (steps 1-10)
+- [ ] Implement settlement pipeline for XRP
+- [ ] Add RLUSD verification (trust line check, issued currency amount parsing)
+- [ ] Add RLUSD settlement
+- [ ] Add Ticket-aware sequence validation
+- [ ] Write unit tests (payload parsing, validation logic, flag rejection)
+- [ ] Write integration tests (end-to-end verify + settle against testnet)
+- [ ] RLUSD configuration (mainnet + testnet issuer addresses)
+- [ ] README with usage examples
+
+**Phase 2 — Compliance Tier (future):**
+- [ ] MPT asset routing branch (verifyMpt / settleMpt)
+- [ ] MPT compliance flag validation
+- [ ] Two-transaction fee model (facilitator wallet, fee verification, two-phase settlement)
+- [ ] `getExtra()` fee advertising
+- [ ] Client documentation (Ticket setup, two-tx fee pattern, MPT payment construction)
+- [ ] Phase 2b: Confidential MPT support (when XLS-94 ships)
+
+**Phase 3 — Cross-Currency Tier (future):**
+- [ ] XRPL DEX integration for auto-conversion
+- [ ] Path-finding for cross-currency settlement
+- [ ] Fee mechanism (reuses Phase 2 two-tx model)
 
 ---
 
 ## Sources
 
+**x402 Protocol:**
 - [x402 Protocol — Facilitator Spec](https://x402.gitbook.io/x402/core-concepts/facilitator)
+- [x402 V2 Specification](https://www.x402.org/writing/x402-v2-launch)
+- [x402 GitHub (Coinbase)](https://github.com/coinbase/x402)
 - [T54.ai x402-secure](https://www.t54.ai/x402-secure)
+- [Coinbase x402 Facilitator Pricing](https://docs.cdp.coinbase.com/x402/welcome)
+
+**XRPL Core:**
+- [XRPL Payment Transaction](https://xrpl.org/docs/references/protocol/transactions/types/payment)
+- [XRPL Reliable Transaction Submission](https://xrpl.org/docs/concepts/transactions/reliable-transaction-submission)
+- [XRPL Tickets](https://xrpl.org/docs/concepts/accounts/tickets)
+- [XRPL Transaction Cost](https://xrpl.org/docs/concepts/transactions/transaction-cost)
+- [XRPL Transaction Queue](https://xrpl.org/docs/concepts/transactions/transaction-queue)
+- [XRPL CAIP-2 Identifiers](https://namespaces.chainagnostic.org/xrpl/caip2)
+
+**RLUSD:**
+- [Ripple RLUSD-Implementation (issuer settings)](https://github.com/ripple/RLUSD-Implementation/blob/main/doc/rlusd-xrpl-settings.md)
+- [RLUSD Testnet Faucet](https://tryrlusd.com/)
+- [XRPL Authorized Trust Lines](https://xrpl.org/docs/concepts/tokens/fungible-tokens/authorized-trust-lines)
+
+**XRPL APIs (used in verify/settle):**
+- [account_info](https://xrpl.org/docs/references/http-websocket-apis/public-api-methods/account-methods/account_info)
+- [account_lines](https://xrpl.org/docs/references/http-websocket-apis/public-api-methods/account-methods/account_lines)
+- [submit](https://xrpl.org/docs/references/http-websocket-apis/public-api-methods/transaction-methods/submit)
+- [XLS-69 simulate (rippled 2.4.0)](https://github.com/XRPLF/XRPL-Standards/discussions/199)
+
+**MPTs (future):**
 - [XRPL Multi-Purpose Tokens](https://xrpl.org/docs/concepts/tokens/fungible-tokens/multi-purpose-tokens)
 - [Confidential MPTs Discussion (XLS-94)](https://github.com/XRPLF/XRPL-Standards/discussions/372)
 - [XRPL Asset Tokenization Whitepaper](https://xrpl.org/static/pdf/Whitepaper_the_future_of_asset_tokenization.pdf)

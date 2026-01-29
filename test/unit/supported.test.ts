@@ -1,22 +1,23 @@
 import { describe, it, expect } from "vitest";
+import { getSupported } from "../../src/facilitator/supported.js";
 
-// Simple unit test to verify test setup works
-describe("Supported Endpoint", () => {
+describe("getSupported", () => {
   it("returns correct structure", () => {
-    const response = {
-      kinds: [
-        {
-          x402Version: 2,
-          scheme: "exact",
-          network: "xrpl:1",
-        },
-      ],
-      extensions: [],
-      signers: {},
-    };
+    const response = getSupported();
 
     expect(response.kinds).toHaveLength(1);
+    expect(response.kinds[0]?.x402Version).toBe(2);
     expect(response.kinds[0]?.scheme).toBe("exact");
     expect(response.kinds[0]?.network).toBe("xrpl:1");
+  });
+
+  it("has empty extensions", () => {
+    const response = getSupported();
+    expect(response.extensions).toEqual([]);
+  });
+
+  it("has empty signers for xrpl:*", () => {
+    const response = getSupported();
+    expect(response.signers["xrpl:*"]).toEqual([]);
   });
 });
