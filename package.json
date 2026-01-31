@@ -13,9 +13,11 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts",
-    "format": "prettier --write \"src/**/*.ts\""
+    "format": "prettier --write \"src/**/*.ts\"",
+    "demo": "tsx examples/demo.ts"
   },
   "dependencies": {
+    "@hono/node-server": "^1.19.9",
     "hono": "^4.7.0",
     "xrpl": "^4.5.0",
     "zod": "^3.24.0"

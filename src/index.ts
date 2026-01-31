@@ -1,3 +1,4 @@
+import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { logger } from "hono/logger";
 import { getSupported } from "./facilitator/supported.js";
@@ -75,7 +76,7 @@ app.post("/settle", async (c) => {
   return c.json(result);
 });
 
-const port = process.env["PORT"] ?? 3402;
+const port = Number(process.env["PORT"] ?? 3402);
 
 // XRPL client lifecycle
 connectClient().then(() => {
@@ -83,6 +84,10 @@ connectClient().then(() => {
 }).catch((err) => {
   console.error("Failed to connect XRPL client:", err);
   console.log(`xrp402 facilitator starting on port ${port} (without XRPL connection)`);
+});
+
+serve({ fetch: app.fetch, port }, () => {
+  console.log(`xrp402 facilitator listening on port ${port}`);
 });
 
 process.on("SIGTERM", async () => {
@@ -96,8 +101,3 @@ process.on("SIGINT", async () => {
   await disconnectClient();
   process.exit(0);
 });
-
-export default {
-  port,
-  fetch: app.fetch,
-};
