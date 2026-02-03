@@ -497,17 +497,19 @@ Once patterns stabilize, create skills in `.claude/skills/`:
 - [x] Stub endpoints: `/`, `/supported`, `/verify`, `/settle`
 - [x] Integration tests pass (testnet connection, wallet creation, tx signing)
 
-**Phase 1 — Standard Tier (in progress):**
-- [ ] Implement `/supported` endpoint with proper schema
-- [ ] Implement verification pipeline for XRP (steps 1-10)
-- [ ] Implement settlement pipeline for XRP
-- [ ] Add RLUSD verification (trust line check, issued currency amount parsing)
-- [ ] Add RLUSD settlement
+**Phase 1 — Standard Tier (mostly complete):**
+- [x] Implement `/supported` endpoint with proper schema
+- [x] Implement verification pipeline for XRP (steps 1-10)
+- [x] Implement settlement pipeline for XRP
+- [x] Add RLUSD verification (trust line check, issued currency amount parsing)
+- [x] Add RLUSD settlement
 - [ ] Add Ticket-aware sequence validation
-- [ ] Write unit tests (payload parsing, validation logic, flag rejection)
-- [ ] Write integration tests (end-to-end verify + settle against testnet)
-- [ ] RLUSD configuration (mainnet + testnet issuer addresses)
-- [ ] README with usage examples
+- [x] Write unit tests (payload parsing, validation logic, flag rejection)
+- [x] Write integration tests (end-to-end verify + settle against testnet)
+- [x] RLUSD configuration (mainnet + testnet issuer addresses)
+- [x] README with usage examples
+- [x] End-to-end demo (`npm run demo` — full payment loop on testnet)
+- [x] Node server binding fix (`@hono/node-server`)
 
 **Phase 2 — Compliance Tier (future):**
 - [ ] MPT asset routing branch (verifyMpt / settleMpt)

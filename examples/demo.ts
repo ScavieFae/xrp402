@@ -3,7 +3,8 @@
 // Usage: npm run demo
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { Client, Wallet } from "xrpl";
+import { Client } from "xrpl";
+import pc from "picocolors";
 import { encodeHeader, decodeHeader } from "./shared.js";
 import type { PaymentPayload, PaymentRequirements, ExactXrplPayload } from "./shared.js";
 
@@ -13,15 +14,59 @@ const RESOURCE_PORT = 3401;
 const FACILITATOR_URL = `http://localhost:${FACILITATOR_PORT}`;
 const RESOURCE_URL = `http://localhost:${RESOURCE_PORT}`;
 
-// ── Helpers ──
+// ── Formatting helpers ──
 
-function log(msg: string) {
-  console.log(msg);
+function truncAddr(addr: string): string {
+  if (addr.length <= 10) return addr;
+  return `${addr.slice(0, 4)}...${addr.slice(-3)}`;
 }
 
-function section(step: string) {
-  console.log(`\n${step}`);
+function elapsed(startMs: number): string {
+  return ((Date.now() - startMs) / 1000).toFixed(1) + "s";
 }
+
+function ok(msg: string) {
+  console.log(`  ${pc.green("✓")} ${msg}`);
+}
+
+function arrow(msg: string) {
+  console.log(`  ${pc.dim("→")} ${msg}`);
+}
+
+function arrowBack(msg: string) {
+  console.log(`  ${pc.dim("←")} ${msg}`);
+}
+
+function detail(msg: string) {
+  console.log(`    ${msg}`);
+}
+
+function stepHeader(n: number, title: string) {
+  console.log(`\n${pc.bold(pc.cyan(`Step ${n}`))} ${pc.dim("·")} ${title}`);
+}
+
+function titleBox() {
+  const inner = [
+    pc.bold("xrp402") + pc.dim(" · ") + "x402 Payments on XRPL",
+    pc.dim("Live demo on XRPL Testnet"),
+  ];
+  // Measure without ANSI for padding (visual columns, not JS length)
+  const plainLens = [
+    "xrp402 · x402 Payments on XRPL".length,
+    "Live demo on XRPL Testnet".length,
+  ];
+  const maxLen = Math.max(...plainLens);
+  const width = maxLen + 4;
+  const border = pc.cyan;
+  console.log(border("┌" + "─".repeat(width) + "┐"));
+  for (let i = 0; i < inner.length; i++) {
+    const pad = width - plainLens[i] - 2;
+    console.log(border("│") + "  " + inner[i] + " ".repeat(Math.max(pad, 0)) + border("│"));
+  }
+  console.log(border("└" + "─".repeat(width) + "┘"));
+}
+
+// ── Infrastructure helpers ──
 
 async function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -48,10 +93,9 @@ function spawnServer(label: string, args: string[], env?: Record<string, string>
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  // Forward stderr so we can see startup errors
   child.stderr?.on("data", (data: Buffer) => {
     const msg = data.toString().trim();
-    if (msg) console.error(`  [${label}] ${msg}`);
+    if (msg) console.error(pc.dim(`  [${label}] ${msg}`));
   });
 
   return child;
@@ -72,16 +116,19 @@ async function main() {
   const processes: ChildProcess[] = [];
   const client = new Client(TESTNET_URL);
 
-  // Ensure cleanup on unexpected exit
   process.on("SIGINT", () => { cleanup(processes, client); process.exit(1); });
   process.on("SIGTERM", () => { cleanup(processes, client); process.exit(1); });
 
   try {
-    log("--- xrp402 Demo: x402 Payment Flow on XRPL Testnet ---");
+    console.log("");
+    titleBox();
 
     // ── Setup ──
-    section("Setting up testnet wallets...");
+    const setupStart = Date.now();
+    console.log(`\n${pc.bold("Setting up")}`);
+
     await client.connect();
+    ok("Connected to XRPL Testnet");
 
     const [clientResult, merchantResult] = await Promise.all([
       client.fundWallet(),
@@ -91,19 +138,17 @@ async function main() {
     const clientWallet = clientResult.wallet;
     const merchantWallet = merchantResult.wallet;
 
-    log(`  Client:   ${clientWallet.address} (${clientResult.balance} XRP)`);
-    log(`  Merchant: ${merchantWallet.address} (${merchantResult.balance} XRP)`);
+    ok(`Client wallet   ${truncAddr(clientWallet.address)}  ${pc.dim(`(${clientResult.balance} XRP)`)}`);
+    ok(`Merchant wallet ${truncAddr(merchantWallet.address)}  ${pc.dim(`(${merchantResult.balance} XRP)`)}`);
 
-    // ── Start servers ──
-    section("Starting facilitator on :3402...");
+    // Start servers
     const facilitator = spawnServer("facilitator", ["src/index.ts"], {
       PORT: String(FACILITATOR_PORT),
     });
     processes.push(facilitator);
     await waitForServer(`${FACILITATOR_URL}/`, "Facilitator");
-    log("  ready");
+    ok(`Facilitator     :${FACILITATOR_PORT} ready`);
 
-    section("Starting resource server on :3401...");
     const resourceServer = spawnServer("resource-server", ["examples/resource-server.ts"], {
       PORT: String(RESOURCE_PORT),
       MERCHANT_ADDRESS: merchantWallet.address,
@@ -111,24 +156,24 @@ async function main() {
     });
     processes.push(resourceServer);
     await waitForServer(`${RESOURCE_URL}/health`, "Resource server");
-    log("  ready");
+    ok(`Resource server  :${RESOURCE_PORT} ready` + pc.dim(`             ${elapsed(setupStart)}`));
 
     // ── Step 1: Request without payment ──
-    section("[1/3] Request without payment");
-    log(`  GET ${RESOURCE_URL}/haiku`);
+    stepHeader(1, "Request a paid resource");
+    arrow(`GET ${pc.dim("http://localhost:" + RESOURCE_PORT)}/haiku`);
 
     const noPayRes = await fetch(`${RESOURCE_URL}/haiku`);
-    log(`  <- ${noPayRes.status} Payment Required`);
+    arrowBack(`${pc.yellow("402")} Payment Required`);
 
     const reqHeader = noPayRes.headers.get("Payment-Required");
     if (!reqHeader) throw new Error("No Payment-Required header in 402 response");
 
     const requirements = decodeHeader<PaymentRequirements>(reqHeader);
     const priceXrp = (Number(requirements.maxAmountRequired) / 1_000_000).toFixed(0);
-    log(`  Requires: ${priceXrp} XRP to ${requirements.payTo}`);
+    detail(`Pay ${priceXrp} XRP to ${truncAddr(requirements.payTo)}`);
 
-    // ── Step 2: Construct and sign payment ──
-    section("[2/3] Construct and sign XRPL payment");
+    // ── Step 2: Sign payment ──
+    stepHeader(2, "Sign an XRPL payment");
 
     const accountInfo = await client.request({
       command: "account_info",
@@ -138,6 +183,9 @@ async function main() {
     const sequence = accountInfo.result.account_data.Sequence;
     const currentLedger = await client.getLedgerIndex();
     const lastLedgerSequence = currentLedger + 50;
+
+    const drops = Number(requirements.maxAmountRequired).toLocaleString();
+    arrow(`${drops} drops  ${truncAddr(clientWallet.address)} ${pc.dim("→")} ${truncAddr(requirements.payTo)}`);
 
     const tx = {
       TransactionType: "Payment" as const,
@@ -150,11 +198,8 @@ async function main() {
     };
 
     const signed = clientWallet.sign(tx);
+    ok(`Signed ${pc.dim(`(sequence ${sequence})`)}`);
 
-    log(`  Payment: ${Number(requirements.maxAmountRequired).toLocaleString()} drops ${clientWallet.address} -> ${requirements.payTo}`);
-    log(`  Signed (sequence ${sequence}, ledger limit +50)`);
-
-    // Build the x402 payment payload
     const xrplPayload: ExactXrplPayload = {
       txBlob: signed.tx_blob,
       authorization: {
@@ -175,9 +220,10 @@ async function main() {
     };
 
     // ── Step 3: Retry with payment ──
-    section("[3/3] Retry with payment");
-    log(`  GET ${RESOURCE_URL}/haiku`);
+    stepHeader(3, "Retry with payment");
+    arrow(`GET ${pc.dim("http://localhost:" + RESOURCE_PORT)}/haiku + ${pc.bold("Payment")} header`);
 
+    const settleStart = Date.now();
     const paidRes = await fetch(`${RESOURCE_URL}/haiku`, {
       headers: {
         Payment: encodeHeader(paymentPayload),
@@ -189,33 +235,53 @@ async function main() {
       throw new Error(`Payment request failed (${paidRes.status}): ${body}`);
     }
 
-    log("  -> Facilitator: verified");
-    log("  -> Facilitator: settled");
-    log(`  <- ${paidRes.status} OK`);
+    const settleTime = elapsed(settleStart);
+    ok("Facilitator verified payment");
+    ok(`Facilitator settled on-chain` + pc.dim(`              ${settleTime}`));
+    arrowBack(`${pc.green("200")} OK`);
 
     const result = await paidRes.json() as {
       haiku: string;
       payment: { transaction: string; network: string; payer: string };
     };
 
-    // ── Print result ──
-    console.log("");
-    for (const line of result.haiku.split("\n")) {
-      log(`  "${line}"`);
-    }
-
     const txHash = result.payment.transaction;
-    console.log("");
-    log(`  Transaction: ${txHash}`);
-    log(`  https://testnet.xrpl.org/transactions/${txHash}`);
+    const txShort = txHash.slice(0, 4) + "..." + txHash.slice(-4);
 
-    console.log("\nDone.");
+    // ── Result box ──
+    const haikuLines = result.haiku.split("\n").map((l) => pc.bold(pc.yellow(`"${l}"`)));
+    const haikuPlainLens = result.haiku.split("\n").map((l) => `"${l}"`.length);
+    const summaryLine = `Settled in ${settleTime} · ${priceXrp} XRP`;
+    const txLine = `testnet.xrpl.org/transactions/${txShort}`;
+
+    const allPlainLens = [...haikuPlainLens, summaryLine.length, txLine.length];
+    const maxLen = Math.max(...allPlainLens);
+    const w = maxLen + 4;
+    const b = pc.yellow;
+
+    console.log("");
+    console.log(b("┌" + "─".repeat(w) + "┐"));
+    console.log(b("│") + " ".repeat(w) + b("│"));
+    for (let i = 0; i < haikuLines.length; i++) {
+      const pad = w - haikuPlainLens[i] - 2;
+      console.log(b("│") + "  " + haikuLines[i] + " ".repeat(Math.max(pad, 0)) + b("│"));
+    }
+    console.log(b("│") + " ".repeat(w) + b("│"));
+    // Summary
+    const sumPad = w - summaryLine.length - 2;
+    console.log(b("│") + "  " + pc.dim(summaryLine) + " ".repeat(Math.max(sumPad, 0)) + b("│"));
+    // TX link
+    const txPad = w - txLine.length - 2;
+    console.log(b("│") + "  " + pc.dim(txLine) + " ".repeat(Math.max(txPad, 0)) + b("│"));
+    console.log(b("│") + " ".repeat(w) + b("│"));
+    console.log(b("└" + "─".repeat(w) + "┘"));
+    console.log("");
   } finally {
     cleanup(processes, client);
   }
 }
 
 main().catch((err) => {
-  console.error("\nDemo failed:", err.message ?? err);
+  console.error(`\n${pc.red("✗")} Demo failed: ${err.message ?? err}`);
   process.exit(1);
 });
