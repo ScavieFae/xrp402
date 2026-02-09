@@ -48,4 +48,5 @@ export interface SupportedKind {
   x402Version: number;
   scheme: string;
   network: string;
+  extra?: Record<string, unknown>;
 }

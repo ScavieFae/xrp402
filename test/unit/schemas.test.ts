@@ -88,6 +88,38 @@ describe("VerifyRequestSchema", () => {
     const result = VerifyRequestSchema.safeParse(bad);
     expect(result.success).toBe(false);
   });
+
+  it("accepts a request with MPTAmount in authorization", () => {
+    const mptPayload = structuredClone(validPayload);
+    mptPayload.paymentPayload.payload.authorization.amount = {
+      mpt_issuance_id: "00000001A407AF5856CFD6C40B1E5C6A5115C681",
+      value: "100",
+    } as unknown as string;
+    mptPayload.paymentRequirements.asset = "mpt:00000001A407AF5856CFD6C40B1E5C6A5115C681";
+
+    const result = VerifyRequestSchema.safeParse(mptPayload);
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts a request with optional fee fields", () => {
+    const feePayload = structuredClone(validPayload);
+    (feePayload.paymentPayload.payload as Record<string, unknown>).feeTxBlob = "AABBCCDD";
+    (feePayload.paymentPayload.payload as Record<string, unknown>).feeAuthorization = {
+      account: "rPayer123",
+      destination: "rFacilitator789",
+      amount: "100000",
+      sequence: 2,
+    };
+
+    const result = VerifyRequestSchema.safeParse(feePayload);
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts a request without fee fields (backwards compatible)", () => {
+    // Original payload without feeTxBlob/feeAuthorization should still work
+    const result = VerifyRequestSchema.safeParse(validPayload);
+    expect(result.success).toBe(true);
+  });
 });
 
 describe("SettleRequestSchema", () => {

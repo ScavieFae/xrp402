@@ -6,13 +6,20 @@ import { decode, validate, verifySignature } from "xrpl";
 import type { Client, Transaction } from "xrpl";
 import type { VerifyResponse, PaymentRequirements } from "../types/x402.js";
 import type { ExactXrplPayload } from "../types/xrpl-payload.js";
-import { isIssuedCurrencyAmount, classifyAsset } from "../types/xrpl-payload.js";
+import { isIssuedCurrencyAmount, isMPTAmount, classifyAsset } from "../types/xrpl-payload.js";
 import { PARTIAL_PAYMENT_FLAG } from "../xrpl/constants.js";
+import type { XrplNetwork } from "../xrpl/constants.js";
 import {
   checkAccountBalance,
   checkLedgerExpiry,
   checkTrustLine,
 } from "../xrpl/network-checks.js";
+import {
+  checkMptAllowlist,
+  checkMptIssuance,
+  checkMptHolder,
+  checkMptDestination,
+} from "../xrpl/mpt-checks.js";
 
 // Step 1: Decode txBlob
 export function decodeTxBlob(txBlob: string): { tx: Record<string, unknown> } | VerifyResponse {
@@ -64,7 +71,7 @@ export function crossCheckAuthorization(
     return { isValid: false, invalidReason: "authorization_mismatch_fee" };
   }
 
-  // Amount comparison: string for XRP drops, object for issued currency
+  // Amount comparison: string for XRP drops, object for issued currency or MPT
   const txAmount = tx["Amount"];
   if (isIssuedCurrencyAmount(auth.amount)) {
     if (typeof txAmount !== "object" || txAmount === null) {
@@ -75,6 +82,17 @@ export function crossCheckAuthorization(
       txAmountObj["currency"] !== auth.amount.currency ||
       txAmountObj["issuer"] !== auth.amount.issuer ||
       // Compare values numerically — xrpl.js normalizes trailing zeros (e.g. "25.50" → "25.5")
+      parseFloat(String(txAmountObj["value"])) !== parseFloat(auth.amount.value)
+    ) {
+      return { isValid: false, invalidReason: "authorization_mismatch_amount" };
+    }
+  } else if (isMPTAmount(auth.amount)) {
+    if (typeof txAmount !== "object" || txAmount === null) {
+      return { isValid: false, invalidReason: "authorization_mismatch_amount" };
+    }
+    const txAmountObj = txAmount as Record<string, unknown>;
+    if (
+      txAmountObj["mpt_issuance_id"] !== auth.amount.mpt_issuance_id ||
       parseFloat(String(txAmountObj["value"])) !== parseFloat(auth.amount.value)
     ) {
       return { isValid: false, invalidReason: "authorization_mismatch_amount" };
@@ -132,6 +150,13 @@ export function checkAmount(
     if (isNaN(paymentValue) || isNaN(requiredValue) || paymentValue < requiredValue) {
       return { isValid: false, invalidReason: "insufficient_amount" };
     }
+  } else if (isMPTAmount(auth.amount)) {
+    // MPT: compare as float (same pattern as issued currency)
+    const paymentValue = parseFloat(auth.amount.value);
+    const requiredValue = parseFloat(requiredAmount);
+    if (isNaN(paymentValue) || isNaN(requiredValue) || paymentValue < requiredValue) {
+      return { isValid: false, invalidReason: "insufficient_amount" };
+    }
   } else {
     // XRP drops: compare as BigInt
     try {
@@ -158,7 +183,7 @@ export function checkAsset(
 
   if (requiredAssetType === "xrp") {
     // XRP: amount must be a string (drops)
-    if (isIssuedCurrencyAmount(auth.amount)) {
+    if (typeof auth.amount !== "string") {
       return { isValid: false, invalidReason: "asset_mismatch" };
     }
   } else if (requiredAssetType === "issued") {
@@ -168,6 +193,16 @@ export function checkAsset(
     }
     if (auth.amount.issuer !== requirements.asset) {
       return { isValid: false, invalidReason: "asset_mismatch_issuer" };
+    }
+  } else if (requiredAssetType === "mpt") {
+    // MPT: amount must be MPTAmount with matching issuance ID
+    if (!isMPTAmount(auth.amount)) {
+      return { isValid: false, invalidReason: "asset_mismatch" };
+    }
+    // Strip "mpt:" prefix from requirements.asset to get issuance ID
+    const requiredIssuanceId = requirements.asset.slice(4);
+    if (auth.amount.mpt_issuance_id !== requiredIssuanceId) {
+      return { isValid: false, invalidReason: "asset_mismatch_issuance_id" };
     }
   } else {
     return { isValid: false, invalidReason: "unsupported_asset_type" };
@@ -227,7 +262,16 @@ export async function verify(
   const step8 = rejectPartialPayment(tx);
   if (step8) return step8;
 
-  // Network steps (9-11) — only if client provided
+  // Step 12: MPT allowlist (local check — runs with or without client)
+  if (isMPTAmount(payload.authorization.amount)) {
+    const step12 = checkMptAllowlist(
+      requirements.network as XrplNetwork,
+      payload.authorization.amount,
+    );
+    if (step12) return step12;
+  }
+
+  // Network steps (9-11, 13-15) — only if client provided
   if (client) {
     // Step 9: Balance + sequence/ticket
     const step9 = await checkAccountBalance(
@@ -255,6 +299,32 @@ export async function verify(
         payload.authorization.amount,
       );
       if (step11) return step11;
+    }
+
+    // Steps 13-15: MPT-specific network checks
+    if (isMPTAmount(payload.authorization.amount)) {
+      const mptAmount = payload.authorization.amount;
+      const issuanceId = mptAmount.mpt_issuance_id;
+
+      // Step 13: MPT issuance exists and is transferable
+      const step13 = await checkMptIssuance(client, issuanceId);
+      if (step13) return step13;
+
+      // Step 14: Sender is authorized holder with sufficient balance
+      const step14 = await checkMptHolder(
+        client,
+        payload.authorization.account,
+        mptAmount,
+      );
+      if (step14) return step14;
+
+      // Step 15: Destination can receive this MPT
+      const step15 = await checkMptDestination(
+        client,
+        payload.authorization.destination,
+        issuanceId,
+      );
+      if (step15) return step15;
     }
   }
 

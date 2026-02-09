@@ -8,10 +8,23 @@ const IssuedCurrencyAmountSchema = z.object({
   value: z.string(),
 });
 
+const MPTAmountSchema = z.object({
+  mpt_issuance_id: z.string(),
+  value: z.string(),
+});
+
+const FeeAuthorizationSchema = z.object({
+  account: z.string(),
+  destination: z.string(),
+  amount: z.string(), // Always XRP drops
+  sequence: z.number().int(),
+  ticketSequence: z.number().int().optional(),
+});
+
 const XrplAuthorizationSchema = z.object({
   account: z.string(),
   destination: z.string(),
-  amount: z.union([z.string(), IssuedCurrencyAmountSchema]),
+  amount: z.union([z.string(), IssuedCurrencyAmountSchema, MPTAmountSchema]),
   fee: z.string(),
   sequence: z.number().int(),
   ticketSequence: z.number().int().optional(),
@@ -21,6 +34,8 @@ const XrplAuthorizationSchema = z.object({
 const ExactXrplPayloadSchema = z.object({
   txBlob: z.string().min(1),
   authorization: XrplAuthorizationSchema,
+  feeTxBlob: z.string().min(1).optional(),
+  feeAuthorization: FeeAuthorizationSchema.optional(),
 });
 
 const PaymentPayloadSchema = z.object({

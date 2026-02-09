@@ -4,7 +4,7 @@
 
 Build the first x402 facilitator for XRPL, enabling HTTP 402 native payments for agentic commerce. Potential to integrate Multi-Purpose Tokens (MPTs) for compliance-aware payments — a capability no other x402 implementation has.
 
-**Status:** IMPLEMENTING — research complete, design locked, building verify/settle
+**Status:** IMPLEMENTING — Phase 1 complete, Phase 2 (MPT + fees) in progress
 
 ---
 
@@ -195,6 +195,28 @@ The key V1 implementation detail: keep `submitAndWait` as its own function, not 
 
 ---
 
+## MPT Use Cases
+
+Multi-Purpose Tokens bring protocol-level compliance to x402 payments. These aren't theoretical — they're the capabilities that make an XRPL facilitator interesting to regulated entities.
+
+### 1. Compliance-Gated Payments
+
+MPT issuances can set `tfMPTRequireAuth`, meaning only holders explicitly authorized by the issuer can transact. The facilitator checks this at verify time, failing with a clear `mpt_holder_not_authorized` error instead of letting the transaction hit the ledger and return an opaque `tecMPTOKEN_NOT_AUTHORIZED`. This matters for agentic commerce: an AI agent paying for a service needs a deterministic "you can't use this token here" rather than burning a transaction fee to find out.
+
+### 2. Authorized Holder Verification
+
+Before accepting an MPT payment, the facilitator queries MPToken ledger entries for both sender and receiver. This is a pre-flight check — is the sender authorized to send? Is the receiver authorized to receive? Does the sender have sufficient balance? All answered before a transaction is submitted. No gas burned on doomed transactions, no ambiguous failures.
+
+### 3. Transfer Fee Awareness
+
+MPT issuers can set a `TransferFee` (0–50,000 basis points, i.e., 0%–50%) on the issuance. When a transfer fee exists, the delivered amount differs from the sent amount. The facilitator accounts for this during amount verification — if the requirement is "deliver 100 tokens" and the issuance has a 1% transfer fee, the signed transaction must send at least 101.01 tokens. This prevents under-delivery that would otherwise only surface at settlement.
+
+### 4. Freeze/Lock Checks
+
+XRPL supports two levels of MPT freezing: issuance-level locks (all holders frozen) and individual holder locks. The facilitator checks both at verify time. A locked holder gets `mpt_holder_locked`; a locked destination gets `mpt_destination_locked`. These are caught before settlement, not during — which means the client can react immediately rather than waiting for a failed transaction to confirm.
+
+---
+
 ## Technical Design (Based on x402 v2 Spec)
 
 ### Network Identifiers (CAIP-2)
@@ -348,10 +370,13 @@ const RLUSD_CONFIG = {
 } as const;
 ```
 
-**MPT (future):**
-- Different transaction type (MPTPayment?)
-- Compliance flags checked at protocol level
-- `asset` field: MPT issuance ID
+**MPT (implemented):**
+- Same `Payment` transaction type — xrpl.js handles `MPTAmount` natively in `Payment.Amount`
+- Amount is object: `{ mpt_issuance_id: "00000001...", value: "100" }`
+- Compliance flags checked at verify time (authorized holder, transferable, not locked)
+- `asset` field: `"mpt:{issuanceId}"` (e.g., `"mpt:00000001A407AF5856..."`)
+- Only allowlisted issuances accepted — hard reject for unknown MPTs
+- Paid-tier feature: requires fee transaction (currently $0, infrastructure ready)
 
 ### Architecture for MPT Future-Proofing
 
@@ -511,12 +536,16 @@ Once patterns stabilize, create skills in `.claude/skills/`:
 - [x] End-to-end demo (`npm run demo` — full payment loop on testnet)
 - [x] Node server binding fix (`@hono/node-server`)
 
-**Phase 2 — Compliance Tier (future):**
-- [ ] MPT asset routing branch (verifyMpt / settleMpt)
-- [ ] MPT compliance flag validation
-- [ ] Two-transaction fee model (facilitator wallet, fee verification, two-phase settlement)
-- [ ] `getExtra()` fee advertising
+**Phase 2 — Compliance Tier (in progress):**
+- [x] MPT types and allowlist infrastructure (`MPTAmount`, `MptConfig`, `MPT_ALLOWLIST`)
+- [x] MPT verification pipeline (crossCheck, checkAmount, checkAsset branches)
+- [x] MPT network checks (allowlist, issuance, holder, destination)
+- [x] Two-transaction fee model (fee verification, two-phase settlement, `FEE_SCHEDULE`)
+- [x] `getExtra()` fee + MPT advertising in `/supported`
+- [ ] MPT allowlist population (onboard first issuers)
+- [ ] Fee amount tuning (currently "0" — infrastructure ready, no charge)
 - [ ] Client documentation (Ticket setup, two-tx fee pattern, MPT payment construction)
+- [ ] Integration tests: MPT verify + settle against testnet with real MPT issuance
 - [ ] Phase 2b: Confidential MPT support (when XLS-94 ships)
 
 **Phase 3 — Cross-Currency Tier (future):**

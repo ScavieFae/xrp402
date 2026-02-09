@@ -1,17 +1,35 @@
 // /supported endpoint response builder
 
 import type { SupportedResponse } from "../types/x402.js";
-import { SUPPORTED_NETWORKS } from "../xrpl/constants.js";
+import { SUPPORTED_NETWORKS, MPT_ALLOWLIST } from "../xrpl/constants.js";
+import type { XrplNetwork } from "../xrpl/constants.js";
+import { getFacilitatorAddress, FEE_SCHEDULE } from "./fee.js";
 
 export function getSupported(): SupportedResponse {
+  const facilitatorAddress = getFacilitatorAddress();
+
   return {
-    kinds: SUPPORTED_NETWORKS.map((network) => ({
-      x402Version: 2,
-      scheme: "exact",
-      network,
-    })),
+    kinds: SUPPORTED_NETWORKS.map((network) => {
+      const mptConfigs = MPT_ALLOWLIST[network as XrplNetwork] ?? [];
+      return {
+        x402Version: 2,
+        scheme: "exact",
+        network,
+        extra: {
+          facilitatorAddress: facilitatorAddress ?? null,
+          facilitatorFee: FEE_SCHEDULE,
+          supportedMpts: mptConfigs.map((mpt) => ({
+            issuanceId: mpt.issuanceId,
+            name: mpt.name,
+            issuer: mpt.issuer,
+            asset: `mpt:${mpt.issuanceId}`,
+          })),
+        },
+      };
+    }),
     extensions: [],
-    // V1: facilitator doesn't sign anything — signers are empty
-    signers: { "xrpl:*": [] },
+    signers: {
+      "xrpl:*": facilitatorAddress ? [facilitatorAddress] : [],
+    },
   };
 }

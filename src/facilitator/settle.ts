@@ -3,7 +3,9 @@
 import type { Client } from "xrpl";
 import type { SettleResponse, PaymentRequirements } from "../types/x402.js";
 import type { ExactXrplPayload } from "../types/xrpl-payload.js";
+import { isMPTAmount } from "../types/xrpl-payload.js";
 import { verify } from "./verify.js";
+import { verifyFeePayload, settleWithFee, FEE_SCHEDULE } from "./fee.js";
 
 /** Map XRPL engine_result codes to human-readable error reasons */
 function mapEngineResult(engineResult: string): string {
@@ -19,6 +21,10 @@ function mapEngineResult(engineResult: string): string {
     temBAD_AMOUNT: "invalid_amount",
     temBAD_FEE: "invalid_fee",
     temDST_IS_SRC: "destination_is_source",
+    tecMPTOKEN_NOT_AUTHORIZED: "mpt_not_authorized",
+    tecMPT_NOT_ENABLED: "mpt_not_enabled",
+    tecMPT_LOCKED: "mpt_locked",
+    tecMPT_MAX_AMOUNT_EXCEEDED: "mpt_max_amount_exceeded",
   };
   return map[engineResult] ?? `settlement_failed: ${engineResult}`;
 }
@@ -135,11 +141,29 @@ export async function settle(
     };
   }
 
+  // Fee verification for paid-tier assets (MPT)
+  if (isMPTAmount(payload.authorization.amount)) {
+    const feeCheck = verifyFeePayload(payload, FEE_SCHEDULE.mpt);
+    if (feeCheck) {
+      return {
+        success: false,
+        errorReason: feeCheck.invalidReason,
+        network,
+      };
+    }
+  }
+
   try {
-    const result = await submitAndWait(client, payload.txBlob);
+    const merchantResult = await submitAndWait(client, payload.txBlob);
     // Fill in the network (submitAndWait doesn't know which network it's on)
-    result.network = network;
-    return result;
+    merchantResult.network = network;
+
+    // Two-phase: if merchant succeeded and fee tx present, submit fee
+    if (payload.feeTxBlob && merchantResult.success) {
+      return settleWithFee(client, merchantResult, payload.feeTxBlob, network);
+    }
+
+    return merchantResult;
   } catch (err) {
     return {
       success: false,

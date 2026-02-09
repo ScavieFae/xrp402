@@ -3,7 +3,7 @@
 
 import type { Client } from "xrpl";
 import type { VerifyResponse } from "../types/x402.js";
-import type { IssuedCurrencyAmount } from "../types/xrpl-payload.js";
+import type { IssuedCurrencyAmount, MPTAmount } from "../types/xrpl-payload.js";
 import { isIssuedCurrencyAmount } from "../types/xrpl-payload.js";
 
 /**
@@ -13,7 +13,7 @@ import { isIssuedCurrencyAmount } from "../types/xrpl-payload.js";
 export async function checkAccountBalance(
   client: Client,
   account: string,
-  amount: string | IssuedCurrencyAmount,
+  amount: string | IssuedCurrencyAmount | MPTAmount,
   fee: string,
   sequence: number,
   ticketSequence?: number,
@@ -30,14 +30,14 @@ export async function checkAccountBalance(
     // 10 XRP base reserve
     const reserve = BigInt(10_000_000);
 
-    if (!isIssuedCurrencyAmount(amount)) {
+    if (typeof amount === "string") {
       // XRP: balance must cover amount + fee + reserve
       const amountDrops = BigInt(amount);
       if (balance < amountDrops + feeDrops + reserve) {
         return { isValid: false, invalidReason: "insufficient_balance" };
       }
     } else {
-      // Issued currency: balance must cover fee + reserve (XRP for fees)
+      // Issued currency or MPT: balance must cover fee + reserve (XRP for fees)
       if (balance < feeDrops + reserve) {
         return { isValid: false, invalidReason: "insufficient_balance_for_fees" };
       }
